@@ -1,18 +1,21 @@
 ---
 name: full-audit
-description: "Audit fonctionnel end-to-end d'un projet web. Trace chaque flux utilisateur du bouton jusqu'a la BDD/API : UI -> handler -> API route -> service externe/BDD -> retour UI. Detecte les chaînons manquants, les features non connectees, et corrige tout. Usage : /full-audit [chemin-du-projet]"
+description: "Audit fonctionnel end-to-end d'un projet web. Trace chaque flux utilisateur du bouton jusqu'a la BDD/API : UI -> handler -> API route -> service externe/BDD -> retour UI. Detecte les chainons manquants, features non connectees. Teste en runtime via Playwright. Corrige tout. Usage : /full-audit [chemin-du-projet]"
 compatibility: claude-code-only
 ---
 
 # Full Audit — Audit fonctionnel end-to-end & Fix
 
-Verifie que **chaque action utilisateur** dans l'app est connectee de bout en bout : du clic sur le bouton jusqu'a l'ecriture en BDD/envoi d'email/appel API, et retour au feedback utilisateur. Detecte tous les chainons manquants et les corrige.
+Verifie que **chaque action utilisateur** dans l'app est connectee de bout en bout : du clic sur le bouton jusqu'a l'ecriture en BDD/envoi d'email/appel API, et retour au feedback utilisateur. Teste en runtime. Detecte tous les chainons manquants et les corrige.
 
 ## Principe fondamental
 
 **L'audit ne regarde pas si le code est "propre". Il verifie si l'app MARCHE.**
 
-Pour chaque feature de l'app, tracer le flux complet :
+Deux niveaux d'audit :
+1. **Analyse statique** — Lire le code et tracer les flux sans executer
+2. **Tests runtime** — Lancer l'app et tester pour de vrai avec Playwright
+
 ```
 UI (bouton/formulaire/lien)
   -> Handler JS (onClick/onSubmit)
@@ -35,73 +38,169 @@ Si UN SEUL maillon de cette chaine est manquant ou casse = **BUG CRITIQUE**.
 
 ---
 
-## Phase 1 : Cartographie du projet (Agent principal)
+## Phase 0 : Build Check (Agent principal)
 
-Avant tout audit, construire la **carte complete** de l'app.
+**Avant TOUT audit, verifier que le projet compile.** Si ca build pas, rien d'autre ne sert.
 
-### 1.1 — Inventaire des pages & routes
+### Etapes
+
+1. **Verifier les dependances** :
+   ```bash
+   cd [chemin] && npm ls --depth=0 2>&1
+   ```
+   - Si `node_modules` n'existe pas -> `npm install`
+   - Si packages manquants -> les installer
+
+2. **Verifier TypeScript** :
+   ```bash
+   npx tsc --noEmit 2>&1
+   ```
+   - Collecter TOUTES les erreurs TS
+   - Classer par severite (error vs warning)
+
+3. **Verifier le build Next.js** :
+   ```bash
+   npx next build 2>&1
+   ```
+   - Si echec : lire l'erreur, identifier le fichier, corriger
+   - Relancer jusqu'a build OK
+
+4. **Verifier les variables d'env** :
+   - Grep tout `process.env.XXX` et `import.meta.env.XXX` dans le code
+   - Verifier presence dans `.env.local` ou `.env`
+   - Lister les manquantes
+
+### Resultat Phase 0
+
+```
+BUILD STATUS : [OK / FAIL]
+Erreurs TS : X
+Erreurs build : X
+Env vars manquantes : [liste]
+```
+
+**Si FAIL** : Corriger les erreurs de build AVANT de passer a la Phase 1.
+**Si OK** : Passer a la Phase 1.
+
+---
+
+## Phase 1 : Detection d'intention & Cartographie (Agent principal)
+
+**Objectif** : Comprendre ce que l'app est CENSEE faire, puis cartographier ce qu'elle fait VRAIMENT.
+
+### 1.1 — Deviner l'intention du projet
+
+Lire ces fichiers pour comprendre le but de l'app :
+
+```
+SOURCES D'INTENTION (par ordre de fiabilite) :
+1. README.md / README — Description du projet, features listees
+2. package.json "description" / "name" — Nom et description
+3. CLAUDE.md / docs/ — Documentation technique
+4. Noms des routes :
+   - /reservation, /booking -> systeme de reservation
+   - /cart, /checkout, /product -> e-commerce
+   - /login, /register, /dashboard -> app avec auth
+   - /blog, /articles -> blog/CMS
+   - /contact -> formulaire de contact
+5. Noms des composants et fichiers :
+   - ReservationForm, BookingCalendar -> reservation
+   - CartProvider, CheckoutForm -> e-commerce
+   - AuthContext, LoginForm -> authentification
+6. Dependances dans package.json :
+   - stripe -> paiement
+   - @prisma/client, @supabase/supabase-js -> BDD
+   - @brevo/*, resend, nodemailer -> emails
+   - next-auth, @clerk/* -> authentification
+   - react-calendar, date-fns -> calendrier/reservation
+```
+
+Construire la **Declaration d'intention** :
+
+```markdown
+## Ce que l'app est CENSEE faire
+
+**Type** : [Site vitrine / App avec reservation / E-commerce / Dashboard / Blog / etc.]
+
+**Features attendues** :
+1. [Feature] — Source : [README / nom de route / dependance]
+2. [Feature] — Source : [README / nom de route / dependance]
+...
+
+**Services externes attendus** :
+- [Service] pour [usage] — Source : [package.json / .env / code]
+...
+```
+
+### 1.2 — Cartographier la realite
+
+Pour chaque page, route API, composant : voir Phase 1 du skill original.
 
 ```
 Pour chaque page dans app/ ou pages/ :
   - URL de la route
   - Composant principal
-  - Est-ce une page statique (SSG) ou dynamique (SSR/client) ?
-  - Quels composants enfants elle utilise ?
-```
+  - Type (statique SSG / dynamique SSR / client)
+  - Composants enfants utilises
 
-### 1.2 — Inventaire des API routes
-
-```
 Pour chaque fichier dans app/api/ ou pages/api/ :
-  - Route (ex: /api/contact, /api/reservations)
-  - Methodes (GET/POST/PUT/DELETE)
-  - Ce qu'elle fait (envoyer email, ecrire en BDD, appeler API externe)
-  - Services externes utilises (Brevo, Stripe, Supabase, Prisma, etc.)
+  - Route, methodes, ce qu'elle fait
+  - Services externes appeles
+
+Pour chaque page, TOUTES les actions utilisateur :
+  - Boutons, formulaires, liens, interactions
+
+Pour chaque service/API/BDD :
+  - Variable d'env requise et presente ?
+  - Client/SDK initialise ?
 ```
 
-### 1.3 — Inventaire des actions utilisateur
+### 1.3 — Ecart intention vs realite
 
-```
-Pour chaque page, lister TOUTES les actions possibles :
-  - Boutons (CTA, submit, navigation, toggle, etc.)
-  - Formulaires (contact, reservation, login, recherche, etc.)
-  - Liens (navigation, ancres, externes)
-  - Interactions (calendrier, slider, modal, dropdown, etc.)
-  - Events (scroll, hover avec effet fonctionnel, etc.)
-```
+Comparer les deux listes :
 
-### 1.4 — Inventaire des connexions externes
+```markdown
+## Ecart Intention vs Realite
 
-```
-Lister tous les services/APIs/BDD utilises :
-  - Base de donnees (Supabase, Prisma, MongoDB, etc.)
-  - Email (Brevo, Resend, SendGrid, Nodemailer)
-  - Paiement (Stripe, PayPal)
-  - Auth (NextAuth, Clerk, Supabase Auth)
-  - Stockage (S3, Cloudinary, Vercel Blob)
-  - Autres APIs (Google Maps, calendrier, etc.)
+| Feature attendue | Source | Statut dans le code | Details |
+|------------------|--------|---------------------|---------|
+| Reservation en ligne | README + /reservation route | PARTIEL | Formulaire present, API manquante |
+| Envoi email contact | /api/contact + Brevo dep | CASSE | Route existe, BREVO_API_KEY manquante |
+| Paiement Stripe | package.json stripe | NON IMPLEMENTE | Dep installee, zero code Stripe |
+| Blog | /blog route | COMPLET | Listing + articles fonctionnels |
 
-Pour chacun :
-  - Variable d'env requise
-  - Variable d'env presente dans .env.local ? Dans le code Vercel ?
-  - Client/SDK initialise correctement ?
+STATUTS :
+- COMPLET : La feature fonctionne de bout en bout
+- PARTIEL : Certains maillons existent, d'autres manquent
+- CASSE : Les maillons existent mais la chaine est rompue
+- NON IMPLEMENTE : La feature est prevue mais le code n'existe pas
+- FANTOME : Du code existe mais aucune intention trouvee (code mort ?)
 ```
 
 ---
 
-## Phase 2 : Audit des flux end-to-end (Sub-Agents paralleles)
+## Phase 2 : Audit statique des flux (3 Sub-Agents paralleles)
 
 Lancer **3 agents en parallele** avec `Task(subagent_type: "general-purpose")`.
 
-### Agent 1 : Tracage des flux UI -> API
+Passer a chaque agent :
+- Le chemin du projet
+- La declaration d'intention (Phase 1.1)
+- La cartographie (Phase 1.2)
+- Le tableau d'ecart (Phase 1.3)
 
-**Le coeur de l'audit.** Pour CHAQUE action utilisateur identifiee en Phase 1 :
+### Agent 1 : Tracage des flux UI -> API -> Service -> Retour
+
+**Le coeur de l'audit.** Pour CHAQUE action utilisateur :
 
 ```
 Prompt :
 
 Tu es un auditeur de flux fonctionnels. Pour le projet a [chemin], trace chaque
 action utilisateur de bout en bout.
+
+CONTEXTE :
+[Coller la declaration d'intention + cartographie + ecart]
 
 POUR CHAQUE BOUTON / FORMULAIRE / INTERACTION dans l'app :
 
@@ -178,17 +277,23 @@ Prompt :
 Tu es un auditeur de coherence de donnees. Pour le projet a [chemin],
 verifie que les types, les schemas et les donnees sont coherents de bout en bout.
 
+CONTEXTE :
+[Coller la declaration d'intention + cartographie]
+
 1. TYPES FRONTEND vs API :
    - Pour chaque appel fetch/axios cote client, identifier le type attendu en reponse
    - Pour chaque API route, identifier le type retourne
    - Verifier que les deux matchent
    - Verifier que les champs utilises dans le JSX existent dans le type
 
-2. TYPES API vs BDD :
-   - Pour chaque modele/schema BDD (Prisma, Mongoose, Supabase types, etc.)
-   - Verifier que les API routes utilisent les bons champs
+2. TYPES API vs BDD/SCHEMA :
+   - Trouver le schema BDD : prisma/schema.prisma, types Supabase, mongoose models, etc.
+   - Pour chaque modele/table, lister les champs
+   - Verifier que les API routes utilisent les bons noms de champs
    - Verifier que les queries retournent les bons champs
    - Verifier que les mutations envoient les bons champs
+   - Signaler les champs du schema jamais utilises (potentiellement inutiles)
+   - Signaler les champs utilises dans le code mais absents du schema
 
 3. FORMULAIRES vs API :
    - Pour chaque formulaire, lister les champs du form (name/id)
@@ -200,7 +305,6 @@ verifie que les types, les schemas et les donnees sont coherents de bout en bout
    - Pour chaque composant avec des props typees (interface/type)
    - Verifier que le parent passe bien toutes les props requises
    - Verifier que le composant utilise bien toutes les props recues
-   - Signaler les props optionnelles jamais passees (code mort)
 
 5. ENV VARS :
    - Grep TOUT `process.env.XXX` dans le code
@@ -214,9 +318,9 @@ FORMAT :
 | # | Frontend (fichier:ligne) | API Route | Probleme |
 |...|...|...|...|
 
-### Desynchronisations API <-> BDD
-| # | API Route | Schema/Modele | Probleme |
-|...|...|...|...|
+### Desynchronisations API <-> BDD/Schema
+| # | API Route | Schema/Modele | Champ | Probleme |
+|...|...|...|...|...|
 
 ### Formulaires desynchronises
 | # | Formulaire | Champs form | Champs API | Diff |
@@ -235,6 +339,9 @@ Prompt :
 Tu es un auditeur d'experience utilisateur. Pour le projet a [chemin],
 verifie que chaque interaction a TOUS ses etats visuels geres.
 
+CONTEXTE :
+[Coller la declaration d'intention + cartographie]
+
 1. ETATS DE CHARGEMENT — Pour chaque appel API/async dans le code :
    - Y a-t-il un loading state (useState, isLoading, isPending) ?
    - L'UI affiche-t-elle un indicateur (spinner, skeleton, disabled button) ?
@@ -245,30 +352,25 @@ verifie que chaque interaction a TOUS ses etats visuels geres.
    - Y a-t-il un try/catch ou .catch() ?
    - L'erreur est-elle affichee a l'utilisateur (toast, message inline, alert) ?
    - Le message est-il comprehensible (pas juste "Error" ou console.log) ?
-   - Si erreur reseau -> y a-t-il un retry ou un message "verifiez votre connexion" ?
 
 3. ETATS VIDES — Pour chaque liste/tableau/grille de donnees :
    - Que se passe-t-il quand il n'y a aucune donnee ?
    - Y a-t-il un empty state (message, illustration) ?
-   - Ou est-ce juste un ecran blanc ?
 
 4. ETATS DE SUCCES — Pour chaque formulaire/action :
    - Y a-t-il un feedback de succes (toast, message, redirect, animation) ?
    - Le formulaire se reset-il apres succes ?
-   - L'utilisateur sait-il que son action a fonctionne ?
 
-5. NAVIGATION & LIENS — Completude :
+5. NAVIGATION & LIENS :
    - Chaque lien dans le header/footer/nav pointe vers une page qui existe
    - Le menu mobile fonctionne (toggle open/close, liens cliquables)
    - Le logo ramene a l'accueil
-   - Les breadcrumbs sont corrects (si presents)
    - Active state sur la page courante dans la nav
 
-6. RESPONSIVE — Verification :
+6. RESPONSIVE :
    - Les composants utilisent-ils des classes responsive (sm:/md:/lg:) ?
    - Le menu mobile est-il different du desktop ?
-   - Les grilles s'adaptent-elles (grid-cols-1 sur mobile) ?
-   - Les textes ne debordent-ils pas (overflow, text truncation) ?
+   - Les grilles s'adaptent-elles ?
 
 FORMAT :
 ## Etats UI & UX
@@ -296,11 +398,225 @@ FORMAT :
 
 ---
 
-## Phase 3 : Rapport consolide
+## Phase 3 : Tests runtime avec Playwright
 
-L'agent principal assemble les 3 rapports en un seul document.
+**Apres l'analyse statique, tester l'app en vrai.**
 
-### Format
+### 3.1 — Lancer le serveur de dev
+
+```bash
+pkill -f "next dev" 2>/dev/null
+trash [chemin]/.next 2>/dev/null
+npm --prefix [chemin] run dev > /tmp/audit-dev.log 2>&1 &
+# Attendre "Ready" dans les logs
+```
+
+### 3.2 — Tests automatiques par page
+
+Utiliser le skill `playwright-cli` pour chaque page :
+
+```
+Pour CHAQUE page de l'app :
+
+1. SCREENSHOT — Prendre un screenshot de la page
+   - Verifier visuellement que la page n'est pas cassee (pas d'ecran blanc, pas d'erreur affichee)
+   - Verifier le rendu desktop ET mobile (viewport 375px)
+
+2. CONSOLE ERRORS — Verifier la console du navigateur
+   - Collecter TOUTES les erreurs console (errors, warnings)
+   - Classifier : erreur JS, 404 resources, CORS, deprecation
+   - Les erreurs JS = bugs a corriger
+
+3. NETWORK — Verifier les appels reseau
+   - Lister tous les appels API faits au chargement de la page
+   - Y a-t-il des 404 ? Des 500 ? Des timeouts ?
+   - Des appels qui ne devraient pas etre la ?
+```
+
+### 3.3 — Tests des flux interactifs
+
+```
+Pour CHAQUE formulaire :
+  1. Remplir avec des donnees valides
+  2. Soumettre
+  3. Verifier : loading state apparait ?
+  4. Verifier : reponse recue ? (succes ou erreur)
+  5. Verifier : feedback affiche a l'utilisateur ?
+  6. Verifier : erreurs console ?
+
+Pour CHAQUE formulaire (test erreur) :
+  1. Soumettre vide (sans remplir)
+  2. Verifier : validation client bloque la soumission ?
+  3. Remplir avec des donnees invalides (email sans @, etc.)
+  4. Verifier : messages d'erreur affiches ?
+
+Pour CHAQUE lien de navigation :
+  1. Cliquer le lien
+  2. Verifier : la page cible charge sans erreur ?
+  3. Verifier : l'URL change correctement ?
+  4. Verifier : pas d'erreur console ?
+
+Pour le menu mobile :
+  1. Viewport 375px
+  2. Cliquer le burger
+  3. Verifier : le menu s'ouvre ?
+  4. Cliquer un lien du menu
+  5. Verifier : navigation + menu se ferme ?
+
+Pour CHAQUE interaction (calendrier, modal, dropdown, etc.) :
+  1. Declencher l'interaction (clic, hover)
+  2. Verifier : l'element reagit visuellement ?
+  3. Verifier : l'etat se met a jour ?
+  4. Verifier : pas d'erreur console ?
+```
+
+### 3.4 — Format des resultats runtime
+
+```markdown
+## Tests Runtime
+
+### Pages testees
+| # | Page | URL | Screenshot | Console errors | Network errors | Statut |
+|---|------|-----|-----------|----------------|----------------|--------|
+| 1 | Accueil | / | OK | 0 | 0 | OK |
+| 2 | Reservation | /reservation | OK | 2 errors | 1x 404 | FAIL |
+| 3 | Contact | /contact | OK | 0 | 0 | OK |
+
+### Formulaires testes
+| # | Formulaire | Page | Soumission valide | Soumission vide | Validation | Feedback | Statut |
+|---|------------|------|-------------------|-----------------|------------|----------|--------|
+| 1 | Contact | /contact | Timeout | Pas de blocage | MANQUANT | MANQUANT | FAIL |
+| 2 | Reservation | /reservation | N/A (bouton desactive) | N/A | N/A | N/A | BLOQUE |
+
+### Navigation testee
+| # | Lien | Source | Destination | Resultat |
+|---|------|--------|-------------|----------|
+| 1 | "Reservation" dans nav | Header | /reservation | OK |
+| 2 | "Blog" dans nav | Header | /blog | 404 |
+
+### Erreurs console collectees
+| # | Page | Type | Message | Fichier:Ligne |
+|---|------|------|---------|---------------|
+| 1 | /reservation | Error | "Cannot read properties of undefined" | ReservationForm.tsx:42 |
+| 2 | /reservation | 404 | GET /api/slots 404 | - |
+```
+
+---
+
+## Phase 4 : Rapport consolide avec correlation
+
+L'agent principal assemble TOUS les resultats et les **correle entre eux**.
+
+### 4.1 — Correlation des findings
+
+Croiser les resultats des 3 agents statiques + les tests runtime :
+
+```
+EXEMPLE DE CORRELATION :
+- Agent 1 trouve : "onSubmit du formulaire contact appelle /api/contact"
+- Agent 2 trouve : "le form envoie { name, email } mais l'API attend { nom, courriel }"
+- Agent 3 trouve : "pas de feedback erreur sur le formulaire contact"
+- Runtime trouve : "soumission du formulaire contact -> erreur 400 en console"
+
+CORRELATION : Le formulaire contact est CASSE.
+  Cause racine : desynchronisation des noms de champs (Agent 2)
+  Consequence : erreur 400 (Runtime)
+  Aggravant : l'utilisateur ne voit rien car pas de feedback erreur (Agent 3)
+  Fix : renommer les champs dans le fetch body OU dans l'API route
+```
+
+Regrouper les findings par **flux** et non par agent :
+
+```markdown
+## Flux : Formulaire de contact
+
+### Analyse statique
+| Etape | Statut | Detail | Source |
+|-------|--------|--------|--------|
+| UI Element | OK | Bouton avec onSubmit | Agent 1 |
+| Handler -> API | RUPTURE | Noms de champs differents | Agent 2 |
+| Feedback erreur | MANQUANT | Catch vide | Agent 3 |
+
+### Test runtime
+| Test | Resultat |
+|------|----------|
+| Soumission valide | Erreur 400 |
+| Soumission vide | Pas de validation |
+| Console | "400 Bad Request" |
+
+### Diagnostic
+**Cause racine** : Champs du formulaire nommes `name`/`email` mais API attend `nom`/`courriel`
+**Impact** : Le formulaire de contact ne fonctionne PAS. Aucun message n'est jamais envoye.
+**Fix** : Aligner les noms de champs (1 fichier, ~5 lignes)
+```
+
+### 4.2 — Schema de flux visuel (Mermaid)
+
+Pour chaque flux majeur, generer un diagramme Mermaid :
+
+```markdown
+### Flux : Formulaire de contact
+
+```mermaid
+graph LR
+    A[Bouton Envoyer] -->|onSubmit| B[handleSubmit]
+    B -->|fetch POST| C[/api/contact]
+    C -->|SDK| D[Brevo API]
+    D -->|email| E[Boite mail client]
+    C -->|response| F[Feedback UI]
+
+    style A fill:#22c55e,color:#fff
+    style B fill:#22c55e,color:#fff
+    style C fill:#ef4444,color:#fff
+    style D fill:#ef4444,color:#fff
+    style F fill:#f59e0b,color:#fff
+
+    %% Legende: vert=OK, rouge=RUPTURE, orange=MANQUANT
+```
+
+Couleurs :
+- Vert (#22c55e) : OK
+- Rouge (#ef4444) : RUPTURE
+- Orange (#f59e0b) : MANQUANT
+- Gris (#6b7280) : DECONNECTE
+```
+
+### 4.3 — Matrice de priorite par impact business
+
+Classer chaque probleme par **impact business**, pas juste severite technique :
+
+```markdown
+## Matrice de priorite
+
+| Impact business | Description | Exemples |
+|-----------------|-------------|----------|
+| BLOQUANT | L'utilisateur NE PEUT PAS utiliser une feature core | Reservation cassee, paiement en echec, formulaire contact ne fonctionne pas |
+| DEGRADANT | L'utilisateur PEUT utiliser la feature mais avec friction | Pas de loading (double clic), pas de message d'erreur (echec silencieux) |
+| COSMETIQUE | N'empeche pas l'utilisation mais degrade l'experience | Pas de empty state, active state manquant dans la nav |
+| INVISIBLE | N'affecte pas l'utilisateur mais degrade la maintenabilite | Types desynchronises, props inutilisees, code mort |
+
+### Problemes par priorite
+
+#### BLOQUANT — A corriger IMMEDIATEMENT
+| # | Flux | Probleme | Cause racine | Fichier(s) | Fix estime |
+|---|------|----------|-------------|------------|------------|
+| 1 | Contact | Formulaire ne fonctionne pas | Champs desynchronises | ContactForm.tsx, route.ts | 5 min |
+| 2 | Reservation | API route manquante | /api/reservations n'existe pas | a creer | 30 min |
+
+#### DEGRADANT — A corriger cette semaine
+| # | Flux | Probleme | Fichier(s) |
+|---|------|----------|------------|
+| 1 | Contact | Pas de loading state | ContactForm.tsx |
+| 2 | Contact | Pas de feedback succes | ContactForm.tsx |
+
+#### COSMETIQUE — A corriger quand possible
+...
+
+#### INVISIBLE — A corriger lors du prochain refacto
+...
+```
+
+### 4.4 — Format du rapport final complet
 
 ```markdown
 # Audit Fonctionnel — [Nom du projet]
@@ -310,85 +626,62 @@ L'agent principal assemble les 3 rapports en un seul document.
 
 ---
 
-## Carte des flux
+## Ce que l'app est CENSEE faire
+[Declaration d'intention de la Phase 1.1]
 
-Pour chaque flux majeur de l'app, un schema simplifie :
-
-### [Nom du flux]
-UI (fichier) -> Handler (fichier:ligne) -> API (/api/xxx) -> Service (Brevo/Supabase/etc.) -> Retour UI
-Statut : [COMPLET / CASSE / INCOMPLET]
-Rupture(s) : [description si casse]
+## Ecart intention vs realite
+[Tableau de la Phase 1.3]
 
 ---
 
-## Ruptures critiques (l'app ne fonctionne pas)
+## Carte des flux (Mermaid)
+[Un diagramme par flux majeur]
 
-Ce qui est CASSE et empeche l'utilisateur de completer une action :
+---
 
-| # | Flux | Maillon casse | Fichier:Ligne | Description | Fix |
-|---|------|---------------|---------------|-------------|-----|
-| 1 | Contact | API -> Brevo | api/contact/route.ts:15 | BREVO_API_KEY non definie | Ajouter dans .env.local |
-| 2 | Reservation | UI -> API | ReservationForm.tsx:42 | onSubmit vide | Implementer handleSubmit |
-| ... | | | | | |
+## Resultats par flux
+[Pour chaque flux : analyse statique + runtime + diagnostic + cause racine]
 
-## Chainons manquants (feature incomplete)
+---
 
-Ce qui MANQUE pour que le flux soit complet :
-
-| # | Flux | Maillon manquant | Ou l'ajouter | Description |
-|---|------|------------------|--------------|-------------|
-| 1 | Contact | Loading state | ContactForm.tsx | Pas de spinner pendant l'envoi |
-| 2 | Contact | Feedback succes | ContactForm.tsx | Aucun message apres envoi |
-| ... | | | | |
-
-## Desynchronisations (les donnees ne matchent pas)
-
-| # | Cote A | Cote B | Probleme |
-|---|--------|--------|----------|
-| 1 | Form envoie { name, email } | API attend { nom, courriel } | Noms de champs differents |
-| ... | | | |
-
-## Etats UI manquants
-
-| # | Composant | Etat manquant | Impact utilisateur |
-|---|-----------|---------------|-------------------|
-| 1 | ReservationForm | Erreur | Echec silencieux |
-| 2 | BlogList | Vide | Page blanche si 0 articles |
-| ... | | | |
+## Matrice de priorite
+[BLOQUANT / DEGRADANT / COSMETIQUE / INVISIBLE]
 
 ---
 
 ## Score de completude fonctionnelle
 
-| Flux | UI | Handler | API | Service | Retour | Score |
-|------|----|---------|-----|---------|--------|-------|
-| Contact | OK | OK | INCOMPLET | RUPTURE | MANQUANT | 2/5 |
-| Reservation | OK | MANQUANT | MANQUANT | MANQUANT | MANQUANT | 1/5 |
-| Navigation | OK | OK | N/A | N/A | OK | 5/5 |
-| ... | | | | | | |
+| Flux | UI | Handler | API | Service | Retour | Runtime | Score |
+|------|----|---------|-----|---------|--------|---------|-------|
+| Contact | OK | OK | RUPTURE | RUPTURE | MANQUANT | FAIL | 2/6 |
+| Reservation | OK | MANQUANT | MANQUANT | MANQUANT | MANQUANT | FAIL | 1/6 |
+| Navigation | OK | OK | N/A | N/A | OK | OK | 6/6 |
 
 **Score global : X/Y flux complets**
+**Problemes : X bloquants, X degradants, X cosmetiques**
 ```
 
 ---
 
-## Phase 4 : Corrections
+## Phase 5 : Corrections
 
-### Priorisation stricte
+### Priorisation stricte (ordre business)
 
-1. **RUPTURES** — Flux casses qui empechent l'app de fonctionner
-2. **CHAINONS MANQUANTS CRITIQUES** — Features dont le flux est >50% present mais incomplet
-3. **DESYNCHRONISATIONS** — Les donnees ne circulent pas correctement
-4. **ETATS UI** — Loading, erreur, succes, vide
+1. **BLOQUANT** — Les features core qui ne marchent pas du tout
+2. **DEGRADANT** — Les features qui marchent mal (pas de loading, pas de feedback)
+3. **DESYNCHRONISATIONS** — Les donnees qui ne circulent pas correctement
+4. **COSMETIQUE** — Les etats UI manquants
+5. **INVISIBLE** — Le cleanup technique
 
 ### Methode de correction
 
-Pour chaque rupture/chainon manquant :
+Pour chaque probleme :
 
-1. **Lire tout le flux** — Comprendre l'intention du code existant
-2. **Identifier le pattern du projet** — Comment les autres flux similaires fonctionnent ?
-3. **Completer le maillon manquant** en suivant le meme pattern
-4. **Verifier le flux complet** apres correction
+1. **Lire la cause racine** identifiee dans le rapport correle
+2. **Lire tout le flux** — Comprendre l'intention du code existant
+3. **Identifier le pattern du projet** — Comment les autres flux similaires fonctionnent ?
+4. **Corriger la cause racine** (pas le symptome)
+5. **Verifier le flux complet** apres correction (re-test avec Playwright)
 
 ### Regles
 
@@ -403,7 +696,9 @@ Pour chaque rupture/chainon manquant :
 
 1. `npx tsc --noEmit` — Zero erreur TypeScript
 2. `npm run build` — Build reussi
-3. Re-tracer chaque flux corrige pour confirmer la chaine complete
+3. Relancer les tests Playwright sur chaque flux corrige
+4. Confirmer : zero erreur console, formulaires fonctionnels, navigation OK
+5. Re-generer les diagrammes Mermaid avec les nouveaux statuts (tout vert)
 
 ---
 
@@ -512,6 +807,7 @@ FLUX : Catalogue -> Panier -> Checkout -> Paiement -> Confirmation
 
 ## Autonomie
 
-- **Phases 1-3** : Lancer automatiquement, sans demander
-- **Phase 4** : Presenter le rapport et demander "Je corrige les X ruptures trouvees ?" avant d'agir
-- **Si --report-only** : s'arreter apres le rapport
+- **Phase 0** : Lancer automatiquement, corriger les erreurs de build sans demander
+- **Phases 1-4** : Lancer automatiquement, produire le rapport
+- **Phase 5** : Presenter le rapport et demander "Je corrige les X problemes bloquants ?" avant d'agir
+- **Si --report-only** : s'arreter apres le rapport (Phase 4)
