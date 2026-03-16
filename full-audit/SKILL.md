@@ -179,9 +179,9 @@ STATUTS :
 
 ---
 
-## Phase 2 : Audit statique des flux (3 Sub-Agents paralleles)
+## Phase 2 : Audit statique des flux (4 Sub-Agents paralleles)
 
-Lancer **3 agents en parallele** avec `Task(subagent_type: "general-purpose")`.
+Lancer **4 agents en parallele** avec `Task(subagent_type: "general-purpose")`.
 
 Passer a chaque agent :
 - Le chemin du projet
@@ -396,6 +396,124 @@ FORMAT :
 |...|...|...|...|
 ```
 
+### Agent 4 : Synchronisation des donnees & Flux bidirectionnels
+
+**Detecte quand une donnee modifiee quelque part (backoffice, admin, BDD) ne se repercute pas ailleurs (frontend, autre page, autre composant).**
+
+C'est l'agent qui trouve les bugs du type : "je change un prix dans le backoffice mais ca change pas en front".
+
+```
+Prompt :
+
+Tu es un auditeur de synchronisation de donnees. Pour le projet a [chemin],
+verifie que quand une donnee est MODIFIEE quelque part, elle se met a jour PARTOUT
+ou elle est affichee.
+
+CONTEXTE :
+[Coller la declaration d'intention + cartographie]
+
+1. IDENTIFIER TOUTES LES SOURCES DE DONNEES :
+   Pour chaque donnee affichee dans l'app (prix, nom, description, statut, date, etc.) :
+   - D'ou vient-elle ? (BDD, API externe, fichier JSON local, hardcodee dans le code, .env)
+   - Ou est-elle affichee ? (quelles pages, quels composants)
+   - Ou est-elle modifiable ? (backoffice, admin, API, dashboard)
+
+2. TRACER LES FLUX D'ECRITURE (modification) :
+   Pour chaque formulaire/action qui MODIFIE une donnee :
+   - Quel composant permet la modif ?
+   - Quel handler est appele ?
+   - Quelle API route est appelee ?
+   - Comment la donnee est-elle ecrite ? (UPDATE BDD, PUT API, ecriture fichier)
+   - Apres l'ecriture, y a-t-il un mecanisme de propagation ?
+
+3. TRACER LES FLUX DE LECTURE (affichage) :
+   Pour chaque endroit ou la donnee est AFFICHEE :
+   - La donnee est-elle fetchee dynamiquement (API call a chaque visite) ?
+   - Ou est-elle statique/cachee ? (SSG, ISR, cache React Query, localStorage)
+   - Si cachee : quel est le mecanisme de revalidation ?
+   - Si statique (SSG) : un rebuild est-il necessaire pour voir la modif ?
+
+4. DETECTER LES RUPTURES DE SYNCHRONISATION :
+
+   Type A — DONNEES HARDCODEES :
+   La donnee est ecrite en dur dans le code (const prices = [...], const services = [...])
+   alors qu'elle devrait venir de la BDD/API.
+   -> Resultat : modifier en backoffice ne change RIEN en front.
+   -> Exemples : prix dans un tableau JS, horaires en dur, liste de services statique
+
+   Type B — CACHE SANS REVALIDATION :
+   La donnee est fetchee mais cachee (ISR, React Query, SWR, localStorage)
+   et il n'y a PAS de mecanisme pour invalider le cache apres modification.
+   -> Resultat : la modif apparait apres X secondes/minutes, ou jamais.
+   -> Verifier : revalidatePath(), revalidateTag(), mutate(), invalidateQueries()
+   -> Verifier : les options de cache (next: { revalidate: X }, staleTime, cacheTime)
+   -> Verifier : si SSG/ISR, y a-t-il un webhook ou on-demand revalidation apres modif ?
+
+   Type C — SOURCES DIVERGENTES :
+   Le backoffice et le frontend ne lisent PAS la meme source.
+   -> Exemple : backoffice lit/ecrit dans table "services", front lit un fichier JSON genere au build
+   -> Exemple : backoffice ecrit dans Supabase, front lit depuis un CMS headless different
+   -> Exemple : backoffice modifie le champ "price", front affiche le champ "tarif" (autre champ)
+
+   Type D — PROPAGATION MANQUANTE :
+   L'ecriture en BDD fonctionne, mais aucun signal n'est envoye pour mettre a jour le front.
+   -> Verifier : apres un PUT/PATCH, y a-t-il un revalidatePath/revalidateTag ?
+   -> Verifier : apres une mutation, y a-t-il un router.refresh() ou un refetch ?
+   -> Verifier : si temps reel necessaire, y a-t-il un websocket/SSE/polling ?
+
+   Type E — ETAT LOCAL DESYNCHRONISE :
+   Le composant utilise un state local (useState) initialise au mount,
+   mais ne se re-synchronise jamais apres une modification externe.
+   -> Exemple : prix charge dans useState au mount, jamais mis a jour
+   -> Verifier : y a-t-il un useEffect avec dependency array qui refetch ?
+   -> Verifier : le state est-il derive des props (qui elles se mettent a jour) ?
+
+5. POUR CHAQUE DONNEE PARTAGEE (affichee ET modifiable), CONSTRUIRE LA MATRICE :
+
+   Donnee : [ex: prix d'un service]
+   Source de verite : [ex: table "services" dans Supabase]
+   Modification : [ex: backoffice/admin/services -> PUT /api/services/:id -> Supabase update]
+   Affichage : [ex: page /reservation -> GET /api/services -> liste des services avec prix]
+
+   Apres modification, la donnee se met-elle a jour en front ?
+   - [ ] L'API route de lecture lit la meme source que l'API route d'ecriture
+   - [ ] Le cache est invalide apres ecriture (revalidatePath, revalidateTag, mutate)
+   - [ ] Si SSG : on-demand revalidation configuree (ou ISR avec revalidate court)
+   - [ ] Le composant front refetch apres navigation (pas de stale state)
+   - [ ] Pas de donnees hardcodees qui court-circuitent la BDD
+
+FORMAT DE SORTIE :
+
+## Synchronisation des Donnees
+
+### Donnees partagees (modifiables + affichees)
+| # | Donnee | Source de verite | Ou modifiee | Ou affichee | Synchro | Probleme |
+|---|--------|-----------------|-------------|-------------|---------|----------|
+| 1 | Prix services | Supabase.services | Backoffice /admin | /reservation | ROMPUE | Front lit prix hardcodes |
+| 2 | Horaires | fichier JSON | Backoffice /admin | Header + /contact | ROMPUE | JSON genere au build, pas de rebuild |
+| 3 | Statut resa | Supabase.reservations | Backoffice | /admin/reservations | OK | Refetch a chaque visite |
+
+### Ruptures de synchronisation detaillees
+| # | Donnee | Type rupture | Flux ecriture | Flux lecture | Cause racine | Fix propose |
+|---|--------|-------------|---------------|-------------|-------------|-------------|
+| 1 | Prix | A (hardcode) | PUT /api/services -> Supabase OK | Front: const prices = [...] | Prix en dur dans ServiceCard.tsx:12 | Remplacer par fetch /api/services |
+| 2 | Horaires | B (cache) | PUT /api/settings -> JSON OK | Front: import data from horaires.json | Fichier statique, pas de revalidation | ISR + revalidateTag('settings') |
+
+### Donnees sans source dynamique (hardcodees)
+| # | Donnee | Fichier:Ligne | Type | Devrait venir de |
+|---|--------|---------------|------|-----------------|
+| 1 | Prix: [50, 75, 120] | ServiceCard.tsx:12 | Array literal | BDD / API |
+| 2 | Horaires: "9h-18h" | Footer.tsx:45 | String literal | BDD / API |
+| 3 | Services: [{name:...}] | data/services.ts:1 | Fichier data | BDD / API |
+
+### Strategie de cache
+| Page/Composant | Type rendu | Cache | Revalidation | Suffisant ? |
+|----------------|-----------|-------|--------------|-------------|
+| /reservation | SSG | Build time | Aucune | NON (donnees dynamiques) |
+| /admin | Client | React Query 5min | staleTime | OUI |
+| /blog | ISR 3600s | 1h | revalidate | ACCEPTABLE |
+```
+
 ---
 
 ## Phase 3 : Tests runtime avec Playwright
@@ -509,7 +627,7 @@ L'agent principal assemble TOUS les resultats et les **correle entre eux**.
 
 ### 4.1 — Correlation des findings
 
-Croiser les resultats des 3 agents statiques + les tests runtime :
+Croiser les resultats des 4 agents statiques + les tests runtime :
 
 ```
 EXEMPLE DE CORRELATION :
